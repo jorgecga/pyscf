@@ -12,22 +12,28 @@ class IndicesX:
 
 class T1:
     def __init__(self, indx, t1, n_occ):
-        self.amps = [{'T1': t1[i, a - n_occ],
-                      'occ': 2 * i + (indx.spin == 'b'),
-                      'virt': 2 * a + (indx.spin == 'b')}
-                      for i in indx.occ for a in indx.virt]
         self.spin = indx.spin
-    
+        offset = int(indx.spin == 'b')
+        self.amps = [{'T1': amp,
+                      'occ': 2 * i + offset,
+                      'virt': 2 * a + offset}
+                      for i in indx.occ for a in indx.virt
+                      if np.log10(np.abs(amp := t1[i, a - n_occ])) > -10]
+
 class T2:
     def __init__(self, indx_1, indx_2, t2, n_occ):
         self.spin1 = indx_1.spin
         self.spin2 = indx_2.spin
-        self.amps = [{'T2': t2[i, j, a - n_occ, b - n_occ],
-                      'occ': [2 * i + (indx_1.spin == 'b'), 2 * j + (indx_2.spin == 'b')],
-                      'virt': [2 * a + (indx_1.spin == 'b'), 2 * b + (indx_2.spin == 'b')]}
+        offset1 = int(indx_1.spin == 'b')
+        offset2 = int(indx_2.spin == 'b')
+        self.amps = [{'T2': amp,
+                      'occ': [2 * i + offset1, 2 * j + offset2],
+                      'virt': [2 * a + offset1, 2 * b + offset2]}
                      for i in indx_1.occ for j in indx_2.occ
                      for a in indx_1.virt for b in indx_2.virt
-                     if any([indx_1.spin != indx_2.spin, j > i and b > a])]
+                     if (any([indx_1.spin != indx_2.spin, j > i and b > a])
+                         and np.log10(np.abs(
+                             amp := t2[i, j, a - n_occ, b - n_occ])) > -10)]
 
 def fci_coefs(ccsolver):
     spat_orbs = cistring.gen_strings4orblist(range(ccsolver.nmo),
@@ -55,40 +61,42 @@ def combine_amps(t1_a, t1_b, t2_aa, t2_bb, t2_ab, num_x, n2):
     n1 = num_x - 2 * n2
 
     t1_amps = t1_a.amps + t1_b.amps
-    t1_combs = (list(comb) for comb in combinations(t1_amps, n1)
-                if filter_combs(comb, 'occ', 't1') == filter_combs(comb, 'virt', 't1') == n1)
-    t1_prods = [{"Product": np.prod([entry['T1'] for entry in comb]),
-                  'occ': [entry['occ'] for entry in comb],
-                  'virt': [entry['virt'] for entry in comb]}
-                  for comb in t1_combs]
+    
+    t1_prods = (comb2prod(comb, 'T1') for comb in combinations(t1_amps, n1)
+                if filter_combs(comb, 't1') == 2 * n1)
     
     t2_amps = t2_aa.amps + t2_bb.amps + t2_ab.amps
-    t2_combs = (list(comb) for comb in list(combinations(t2_amps, n2))
-                if filter_combs(comb, 'occ', 't2') == filter_combs(comb, 'virt', 't2') == 2 * n2)
-    t2_prods = [{"Product": np.prod([entry['T2'] for entry in comb]),
-                  'occ': sum([entry['occ'] for entry in comb], []),
-                  'virt': sum([entry['virt'] for entry in comb], [])}
-                  for comb in t2_combs]
+
+    t2_prods = (comb2prod(comb, 'T2') for comb in combinations(t2_amps, n2)
+                if filter_combs(comb, 't2') == 4 * n2)
 
     total_prod = [prod_1["Product"] * prod_2["Product"]
                   for prod_1 in t1_prods for prod_2 in t2_prods
-                  if (filter_orbs(prod_1['occ'], prod_2['occ']) and
-                      filter_orbs(prod_1['virt'], prod_2['virt']))]
+                  if (filter_orbs([*prod_1['occ'], *prod_1['virt']],
+                                  [*prod_2['occ'], *prod_2['virt']]))]
 
     return sum(total_prod)
 
+def comb2prod(comb, tn):
+    orbs_occ = [entry['occ'] for entry in comb]
+    orbs_virt = [entry['virt'] for entry in comb]
+    if tn == 'T2':
+        orbs_occ = sum(orbs_occ, [])
+        orbs_virt = sum(orbs_virt, [])
+    return {"Product": np.prod([entry[tn] for entry in comb]),
+            'occ': orbs_occ,
+            'virt': orbs_virt}
 
-def filter_combs(combination, field, tn):
-    vec = [entry[field] for entry in combination]
-    if tn == 't2':
-        vec = sum(vec, [])
-    return len(set(vec))
+def filter_combs(combination, tn):
+    if tn == 't1':
+        return len({orb for entry in combination
+                    for orb in [entry['occ'], entry['virt']]})
+    elif tn == 't2':
+        return len({orb for entry in combination
+                    for orb in [*entry['occ'], *entry['virt']]})
 
 def filter_orbs(ind_1,ind_2):
     return not bool(set(ind_1).intersection(set(ind_2)))
-
-def ind2array(ind, tn):
-    return np.asarray([tn[tuple(elems)] for elems in ind])
 
 def mapper(func, *args, **kwargs):
     return list(map(lambda var: func(*var, **kwargs), *args))
